@@ -9,7 +9,10 @@ const { GoogleGenAI } = require("@google/genai");
 dotenv.config();
 
 const PORT = Number(process.env.PORT || 5000);
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION || "v1";
+const GEMINI_MAX_RETRIES = Number(process.env.GEMINI_MAX_RETRIES || 3);
+const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS || 60000);
 const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 const CONTACT_TO = process.env.CONTACT_TO || "contact@productdetailer.com";
 
@@ -29,7 +32,10 @@ app.use(express.json({ limit: "1mb" }));
 const ai = apiKey
   ? new GoogleGenAI({
       apiKey,
-      apiVersion: "v1",
+      httpOptions: {
+        apiVersion: GEMINI_API_VERSION,
+        timeout: GEMINI_TIMEOUT_MS,
+      },
     })
   : null;
 
@@ -145,6 +151,10 @@ function normalizeGeminiError(error, fallbackMessage) {
     status = 429;
   }
 
+  if (String(message).toLowerCase().includes("overload")) {
+    status = 503;
+  }
+
   if (String(message).toLowerCase().includes("api key")) {
     status = status === 500 ? 401 : status;
   }
@@ -155,12 +165,81 @@ function normalizeGeminiError(error, fallbackMessage) {
   };
 }
 
+function isRetryableGeminiError(error) {
+  const normalized = normalizeGeminiError(error, "Gemini request failed");
+  const message = cleanText(error?.message).toLowerCase();
+
+  return (
+    [429, 500, 502, 503, 504].includes(normalized.status) ||
+    message.includes("resource_exhausted") ||
+    message.includes("rate limit") ||
+    message.includes("quota") ||
+    message.includes("overload") ||
+    message.includes("unavailable") ||
+    message.includes("temporarily")
+  );
+}
+
+function getRetryDelayMs(error, attempt) {
+  const retryAfter =
+    error?.response?.headers?.get?.("retry-after") ||
+    error?.headers?.get?.("retry-after") ||
+    error?.headers?.["retry-after"];
+
+  if (retryAfter) {
+    const retryAfterSeconds = Number(retryAfter);
+    if (Number.isFinite(retryAfterSeconds)) {
+      return Math.min(retryAfterSeconds * 1000, 10000);
+    }
+
+    const retryAfterDate = Date.parse(retryAfter);
+    if (!Number.isNaN(retryAfterDate)) {
+      return Math.min(Math.max(retryAfterDate - Date.now(), 0), 10000);
+    }
+  }
+
+  const baseDelay = 600 * 2 ** (attempt - 1);
+  const jitter = Math.floor(Math.random() * 250);
+
+  return Math.min(baseDelay + jitter, 8000);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function clientErrorMessage(error, fallbackMessage) {
+  const normalized = normalizeGeminiError(error, fallbackMessage);
+
+  if (normalized.status === 401 || normalized.status === 403) {
+    return "Gemini is not configured correctly on the server. Please check the API key and permissions.";
+  }
+
+  if (normalized.status === 429) {
+    return "Gemini is rate limited right now. Please wait a moment and try again.";
+  }
+
+  if ([500, 502, 503, 504].includes(normalized.status)) {
+    return "Gemini is temporarily unavailable. Please try again in a moment.";
+  }
+
+  if (normalized.status === 400 && normalized.message.toLowerCase().includes("model")) {
+    return `The configured Gemini model "${MODEL}" is not available for this API key. Set GEMINI_MODEL to a supported model such as gemini-2.5-flash-lite.`;
+  }
+
+  return normalized.message || fallbackMessage;
+}
+
 function sendError(res, error, fallbackMessage) {
   const normalized = normalizeGeminiError(error, fallbackMessage);
 
   res.status(normalized.status).json({
     success: false,
-    message: normalized.message,
+    message:
+      process.env.NODE_ENV === "production"
+        ? clientErrorMessage(error, fallbackMessage)
+        : normalized.message,
+    retryable: isRetryableGeminiError(error),
   });
 }
 
@@ -180,21 +259,43 @@ function extractGeminiText(response) {
 
 async function generateDescription(product) {
   const client = requireGemini();
-  const response = await client.models.generateContent({
-    model: MODEL,
-    contents: buildPrompt(product),
-    config: {
-      temperature: 0.75,
-      topP: 0.95,
-    },
-  });
+  const prompt = buildPrompt(product);
+  let lastError;
 
-  const text = extractGeminiText(response);
-  if (!text) {
-    throw new Error("Gemini returned an empty response");
+  for (let attempt = 1; attempt <= GEMINI_MAX_RETRIES + 1; attempt += 1) {
+    try {
+      const response = await client.models.generateContent({
+        model: MODEL,
+        contents: prompt,
+        config: {
+          temperature: 0.75,
+          topP: 0.95,
+        },
+      });
+
+      const text = extractGeminiText(response);
+      if (!text) {
+        throw new Error("Gemini returned an empty response");
+      }
+
+      return text;
+    } catch (error) {
+      lastError = error;
+
+      if (attempt > GEMINI_MAX_RETRIES || !isRetryableGeminiError(error)) {
+        throw error;
+      }
+
+      const delayMs = getRetryDelayMs(error, attempt);
+      console.warn(
+        `Gemini request failed on attempt ${attempt}; retrying in ${delayMs}ms`,
+        normalizeGeminiError(error, "Gemini request failed")
+      );
+      await sleep(delayMs);
+    }
   }
 
-  return text;
+  throw lastError || new Error("Gemini request failed");
 }
 
 function parseWorkbook(buffer) {
