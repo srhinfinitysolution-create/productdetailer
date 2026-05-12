@@ -77,6 +77,14 @@ async function sendContactEmail({ name, email, message }) {
   return data;
 }
 
+function contactErrorMessage(error) {
+  if (process.env.NODE_ENV === "production") {
+    return "Failed to send message";
+  }
+
+  return error.message || "Failed to send message";
+}
+
 function requireGemini() {
   if (!ai) {
     throw new Error("GEMINI_API_KEY is missing in backend/.env");
@@ -414,7 +422,7 @@ app.post("/api/contact", async (req, res) => {
     console.error("Contact email failed:", error);
     res.status(500).json({
       success: false,
-      message: error.message || "Failed to send message",
+      message: contactErrorMessage(error),
     });
   }
 });
