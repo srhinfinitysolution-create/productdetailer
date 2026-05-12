@@ -55,15 +55,20 @@ function getMailTransporter() {
   }
 
   return nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465,
-    family: 4,
-    auth: {
-      user,
-      pass,
-    },
-  });
+  host,
+  port,
+  secure: false,
+  requireTLS: true,
+  family: 4,
+  auth: {
+    user,
+    pass,
+  },
+  tls: {
+    rejectUnauthorized: false,
+  },
+  connectionTimeout: 30000,
+});
 }
 
 function requireGemini() {
