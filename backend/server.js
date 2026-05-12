@@ -9,7 +9,7 @@ const { GoogleGenAI } = require("@google/genai");
 dotenv.config();
 
 const PORT = Number(process.env.PORT || 5000);
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 const CONTACT_TO = process.env.CONTACT_TO || "contact@productdetailer.com";
 

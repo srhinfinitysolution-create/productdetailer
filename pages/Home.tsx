@@ -4,7 +4,7 @@ import { ArrowRight, CheckCircle2, ShoppingBag, TrendingUp, Sparkles, Globe, Zap
 import { useAuth } from '../contexts/AuthContext';
 import PageSEO from '../components/PageSEO';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "https://productdetailer.onrender.com";
 
 const Home: React.FC = () => {
   const [results, setResults] = useState<any[]>([]);
