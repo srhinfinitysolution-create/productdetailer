@@ -3,7 +3,6 @@ const cors = require("cors");
 const multer = require("multer");
 const XLSX = require("xlsx");
 const dotenv = require("dotenv");
-const nodemailer = require("nodemailer");
 const { GoogleGenAI } = require("@google/genai");
 
 dotenv.config();
@@ -15,6 +14,7 @@ const GEMINI_MAX_RETRIES = Number(process.env.GEMINI_MAX_RETRIES || 3);
 const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS || 60000);
 const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 const CONTACT_TO = process.env.CONTACT_TO || "contact@productdetailer.com";
+const RESEND_FROM = process.env.RESEND_FROM || "ProductDetailer <noreply@productdetailer.com>";
 
 const app = express();
 const upload = multer({
@@ -25,6 +25,7 @@ const upload = multer({
 });
 
 let generatedResults = [];
+let resendClient = null;
 
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "1mb" }));
@@ -39,36 +40,41 @@ const ai = apiKey
     })
   : null;
 
-function getMailTransporter() {
-  const host = process.env.SMTP_HOST;
-  const port = Number(process.env.SMTP_PORT || 587);
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
+async function getResendClient() {
+  const resendApiKey = process.env.RESEND_API_KEY;
 
-  if (!host || !user || !pass) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("Email service is not configured. Add SMTP_HOST, SMTP_PORT, SMTP_USER, and SMTP_PASS to backend/.env.");
-    }
-
-    console.warn("SMTP is not configured. Using local JSON email transport.");
-    return nodemailer.createTransport({ jsonTransport: true });
+  if (!resendApiKey) {
+    throw new Error("Email service is not configured. Add RESEND_API_KEY to backend/.env.");
   }
 
-  return nodemailer.createTransport({
-  host,
-  port,
-  secure: false,
-  requireTLS: true,
-  family: 4,
-  auth: {
-    user,
-    pass,
-  },
-  tls: {
-    rejectUnauthorized: false,
-  },
-  connectionTimeout: 30000,
-});
+  if (!resendClient) {
+    const { Resend } = await import("resend");
+    resendClient = new Resend(resendApiKey);
+  }
+
+  return resendClient;
+}
+
+async function sendContactEmail({ name, email, message }) {
+  const resend = await getResendClient();
+  const { data, error } = await resend.emails.send({
+    from: RESEND_FROM,
+    to: CONTACT_TO,
+    replyTo: email,
+    subject: `New ProductDetailer contact from ${name}`,
+    text: `Name: ${name}\nEmail: ${email}\n\n${message}`,
+    html: `
+      <p><strong>Name:</strong> ${escapeHtml(name)}</p>
+      <p><strong>Email:</strong> ${escapeHtml(email)}</p>
+      <p>${escapeHtml(message).replace(/\n/g, "<br>")}</p>
+    `,
+  });
+
+  if (error) {
+    throw new Error(error.message || "Failed to send message");
+  }
+
+  return data;
 }
 
 function requireGemini() {
@@ -398,19 +404,7 @@ app.post("/api/contact", async (req, res) => {
       });
     }
 
-    const transporter = getMailTransporter();
-    await transporter.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
-      to: CONTACT_TO,
-      replyTo: email,
-      subject: `New ProductDetailer contact from ${name}`,
-      text: `Name: ${name}\nEmail: ${email}\n\n${message}`,
-      html: `
-        <p><strong>Name:</strong> ${escapeHtml(name)}</p>
-        <p><strong>Email:</strong> ${escapeHtml(email)}</p>
-        <p>${escapeHtml(message).replace(/\n/g, "<br>")}</p>
-      `,
-    });
+    await sendContactEmail({ name, email, message });
 
     res.json({
       success: true,
